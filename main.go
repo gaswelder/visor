@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
@@ -49,19 +50,28 @@ func main() {
 }
 
 func run(p proc) {
+	f, err := os.OpenFile(fmt.Sprintf("%s.log", p.Name), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+
 	quits := 0
 	for {
-		t := time.Now()
 		cmd := exec.Command(p.Command)
 		cmd.Dir = p.Dir
+		cmd.Stdout = f
+		cmd.Stderr = f
+
+		t := time.Now()
 		err := cmd.Run()
-		dt := time.Since(t)
+		report("%s quit after %v: %v", p.Name, time.Since(t), err)
+
 		quits++
-		report("%s quit after %v: %v", p.Name, dt.String(), err)
 		if quits > 2 {
+			quits = 0
 			report("%s: taking a timeout, %s", p.Name, time.Hour.String())
 			time.Sleep(time.Hour)
-			quits = 0
 		}
 	}
 }
