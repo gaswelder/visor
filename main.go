@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -56,9 +57,11 @@ func run(p proc) {
 	}
 	defer f.Close()
 
+	args := strings.Split(p.Command, " ")
+
 	quits := 0
 	for {
-		cmd := exec.Command(p.Command)
+		cmd := exec.Command(args[0], args[1:]...)
 		cmd.Dir = p.Dir
 		cmd.Stdout = f
 		cmd.Stderr = f
