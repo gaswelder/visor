@@ -60,16 +60,24 @@ func run(p proc) {
 	args := strings.Split(p.Command, " ")
 
 	quits := 0
-	for {
+
+	run := func() {
+		t := time.Now()
 		cmd := exec.Command(args[0], args[1:]...)
 		cmd.Dir = p.Dir
 		cmd.Stdout = f
 		cmd.Stderr = f
-
-		t := time.Now()
-		err := cmd.Run()
+		err := cmd.Start()
+		if err != nil {
+			return
+		}
+		log.Printf("started %s, pid = %v\n", p.Name, cmd.Process.Pid)
+		err = cmd.Wait()
 		report("%s quit after %v: %v", p.Name, time.Since(t), err)
+	}
 
+	for {
+		run()
 		quits++
 		if quits > 2 {
 			quits = 0
