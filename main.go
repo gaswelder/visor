@@ -98,26 +98,69 @@ func main() {
 	}
 }
 
-func run(p proc, reboot <-chan bool) {
-	f, err := os.OpenFile(fmt.Sprintf("%s.log", p.Name), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer f.Close()
+type localWriter struct {
+	buf      []byte
+	procName string
+	stream   string
+}
 
+func indexOf(p []byte, q byte) int {
+	n := len(p)
+	for i := 0; i < n; i++ {
+		if p[i] == '\n' {
+			return i
+		}
+	}
+	return -1
+}
+
+func (w *localWriter) Write(p []byte) (int, error) {
+	w.buf = append(w.buf, p...)
+	for {
+		pos := indexOf(w.buf, '\n')
+		if pos < 0 {
+			break
+		}
+
+		var m map[string]any
+		err := json.Unmarshal(w.buf[0:pos], &m)
+		if err != nil {
+			m = map[string]any{
+				"msg": string(w.buf[0:pos]),
+			}
+		}
+		m["visorProc"] = w.procName
+		m["visorStream"] = w.stream
+		m["t"] = time.Now().Format(time.RFC3339)
+		ss, err := json.Marshal(m)
+		if err != nil {
+			panic(err)
+		}
+		os.Stdout.WriteString(string(ss) + "\n")
+
+		rest := w.buf[pos+1:]
+		ll := len(rest)
+		copy(w.buf, rest)
+		w.buf = w.buf[0:ll]
+	}
+	return len(p), nil
+}
+
+func run(p proc, reboot <-chan bool) {
 	args := strings.Split(p.Command, " ")
 	quits := 0
 	run := func() {
 		t := time.Now()
 		cmd := exec.Command(args[0], args[1:]...)
 		cmd.Dir = p.Dir
-		cmd.Stdout = f
-		cmd.Stderr = f
+		cmd.Stdout = &localWriter{procName: p.Name, stream: "stdout"}
+		cmd.Stderr = &localWriter{procName: p.Name, stream: "stderr"}
 		err := cmd.Start()
 		if err != nil {
 			return
 		}
-		log.Printf("started %s, pid = %v\n", p.Name, cmd.Process.Pid)
+		msg("info", fmt.Sprintf("started %s, pid = %v\n", p.Name, cmd.Process.Pid), nil)
+
 		quit := make(chan error, 1)
 		go func() {
 			quit <- cmd.Wait()
@@ -144,4 +187,19 @@ func run(p proc, reboot <-chan bool) {
 			time.Sleep(time.Hour)
 		}
 	}
+}
+
+func msg(level string, message string, data map[string]string) {
+	e := map[string]string{}
+	for k, v := range data {
+		e[k] = v
+	}
+	e["level"] = level
+	e["msg"] = message
+	e["t"] = time.Now().Format(time.RFC3339)
+	s, err := json.Marshal(e)
+	if err != nil {
+		log.Println("failed to format a log", err)
+	}
+	os.Stdout.WriteString(string(s) + "\n")
 }
