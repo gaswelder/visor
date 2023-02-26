@@ -52,10 +52,14 @@ func main() {
 	}
 	go sendReports(email, key, secret)
 
-	reboots := map[string]chan bool{}
+	requestChannels := map[string]chan string{}
+	quitChannels := map[string]chan bool{}
 	for _, p := range config.Processes {
-		reboots[p.Name] = make(chan bool)
-		go run(p, reboots[p.Name])
+		r := make(chan string)
+		q := make(chan bool)
+		requestChannels[p.Name] = r
+		quitChannels[p.Name] = q
+		go run(p, requestChannels[p.Name], q)
 	}
 
 	for {
@@ -76,20 +80,31 @@ func main() {
 			}
 			line = strings.Trim(line, " \r\n")
 			parts := strings.Split(line, " ")
-			if len(parts) != 2 {
-				ln.Write([]byte("unknown syntax\n"))
-				continue
-			}
 			switch parts[0] {
 			case "reboot":
+				if len(parts) != 2 {
+					ln.Write([]byte("unknown syntax\n"))
+					continue
+				}
 				name := parts[1]
-				ch := reboots[name]
+				ch := requestChannels[name]
 				if ch == nil {
 					ln.Write([]byte("no task named " + name + "\n"))
 					break
 				}
-				ch <- true
+				ch <- "reboot"
 				ln.Write([]byte("ok\n"))
+			case "term":
+				if len(parts) != 1 {
+					ln.Write([]byte("unknown syntax\n"))
+					continue
+				}
+				ln.Write([]byte("ok\n"))
+				for k, ch := range requestChannels {
+					ch <- "term"
+					<-quitChannels[k]
+				}
+				os.Exit(1)
 			default:
 				ln.Write([]byte("unknown command\n"))
 			}
@@ -158,10 +173,23 @@ func (w *localWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func run(p proc, reboot <-chan bool) {
+func run(p proc, requests <-chan string, quit chan<- bool) {
+	defer func() {
+		quit <- true
+	}()
 	args := strings.Split(p.Command, " ")
 	quits := 0
-	run := func() {
+	data := map[string]string{
+		"visorProc": p.Name,
+	}
+
+	type child struct {
+		startTime time.Time
+		quitChan  chan error
+		stop      func()
+	}
+
+	start := func() (*child, error) {
 		t := time.Now()
 		cmd := exec.Command(args[0], args[1:]...)
 		cmd.Dir = p.Dir
@@ -169,34 +197,56 @@ func run(p proc, reboot <-chan bool) {
 		cmd.Stderr = &localWriter{procName: p.Name, stream: "stderr"}
 		err := cmd.Start()
 		if err != nil {
-			return
+			return nil, err
 		}
 		msg("info", fmt.Sprintf("started %s, pid = %v\n", p.Name, cmd.Process.Pid), nil)
-
 		quit := make(chan error, 1)
 		go func() {
 			quit <- cmd.Wait()
 		}()
-		select {
-		case err := <-quit:
-			report("%s quit after %v: %v", p.Name, time.Since(t), err)
-			quits++
-		case <-reboot:
-			log.Printf("got a reboot signal for %s, waiting for the process to exit", p.Name)
+		stop := func() {
 			cmd.Process.Signal(os.Interrupt)
 			err = cmd.Wait()
 			if err != nil {
 				log.Printf("wait failed: %v", err)
 			}
-			quits = 0
 		}
+		return &child{t, quit, stop}, nil
 	}
 	for {
-		run()
+		child, err := start()
+		if err != nil {
+			msg("error", fmt.Sprintf("failed to start: %v", err), data)
+			return
+		}
+		select {
+		case err := <-child.quitChan:
+			report("%s quit after %v: %v", p.Name, time.Since(child.startTime), err)
+			quits++
+		case req := <-requests:
+			switch req {
+			case "reboot":
+				msg("info", "get a reboot signal, waiting for the process to exit", data)
+				child.stop()
+				quits = 0
+			case "term":
+				msg("info", "got a termination signal, closing the process", data)
+				child.stop()
+				return
+			}
+		}
 		if quits > 2 {
 			quits = 0
 			report("%s: taking a timeout, %s", p.Name, time.Hour.String())
-			time.Sleep(time.Hour)
+			select {
+			case <-time.After(time.Hour):
+			case req := <-requests:
+				switch req {
+				case "term":
+					msg("info", "got a termination signal, quitting", data)
+					return
+				}
+			}
 		}
 	}
 }
