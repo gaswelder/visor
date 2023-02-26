@@ -128,7 +128,7 @@ func (w *localWriter) Write(p []byte) (int, error) {
 	if w.stream == "stderr" {
 		emit(map[string]any{
 			"level": "error",
-			"msg":   string(p),
+			"msg":   strings.Trim(string(p), "\n"),
 		})
 		return len(p), nil
 	}
