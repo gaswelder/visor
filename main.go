@@ -115,6 +115,24 @@ func indexOf(p []byte, q byte) int {
 }
 
 func (w *localWriter) Write(p []byte) (int, error) {
+	emit := func(m map[string]any) {
+		m["visorProc"] = w.procName
+		m["t"] = time.Now().Format(time.RFC3339)
+		ss, err := json.Marshal(m)
+		if err != nil {
+			panic(err)
+		}
+		os.Stdout.WriteString(string(ss) + "\n")
+	}
+
+	if w.stream == "stderr" {
+		emit(map[string]any{
+			"level": "error",
+			"msg":   string(p),
+		})
+		return len(p), nil
+	}
+
 	w.buf = append(w.buf, p...)
 	for {
 		pos := indexOf(w.buf, '\n')
@@ -125,18 +143,12 @@ func (w *localWriter) Write(p []byte) (int, error) {
 		var m map[string]any
 		err := json.Unmarshal(w.buf[0:pos], &m)
 		if err != nil {
+			// The line is not a JSON, so create a map and put the line there.
 			m = map[string]any{
 				"msg": string(w.buf[0:pos]),
 			}
 		}
-		m["visorProc"] = w.procName
-		m["visorStream"] = w.stream
-		m["t"] = time.Now().Format(time.RFC3339)
-		ss, err := json.Marshal(m)
-		if err != nil {
-			panic(err)
-		}
-		os.Stdout.WriteString(string(ss) + "\n")
+		emit(m)
 
 		rest := w.buf[pos+1:]
 		ll := len(rest)
