@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -119,16 +120,6 @@ type localWriter struct {
 	stream   string
 }
 
-func indexOf(p []byte, q byte) int {
-	n := len(p)
-	for i := 0; i < n; i++ {
-		if p[i] == '\n' {
-			return i
-		}
-	}
-	return -1
-}
-
 func (w *localWriter) Write(p []byte) (int, error) {
 	logData := map[string]any{"visorProc": w.procName}
 
@@ -140,7 +131,7 @@ func (w *localWriter) Write(p []byte) (int, error) {
 
 	w.buf = append(w.buf, p...)
 	for {
-		pos := indexOf(w.buf, '\n')
+		pos := bytes.IndexByte(w.buf, '\n')
 		if pos < 0 {
 			break
 		}
