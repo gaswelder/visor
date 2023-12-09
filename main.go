@@ -59,7 +59,7 @@ func main() {
 		q := make(chan bool)
 		requestChannels[p.Name] = r
 		quitChannels[p.Name] = q
-		go run(p, requestChannels[p.Name], q)
+		go maintainProcess(p, requestChannels[p.Name], q)
 	}
 
 	for {
@@ -130,21 +130,11 @@ func indexOf(p []byte, q byte) int {
 }
 
 func (w *localWriter) Write(p []byte) (int, error) {
-	emit := func(m map[string]any) {
-		m["visorProc"] = w.procName
-		m["t"] = time.Now().Format(time.RFC3339)
-		ss, err := json.Marshal(m)
-		if err != nil {
-			panic(err)
-		}
-		os.Stdout.WriteString(string(ss) + "\n")
-	}
+	logData := map[string]any{"visorProc": w.procName}
 
+	// Assume anything that's in stderr is an error and not structured.
 	if w.stream == "stderr" {
-		emit(map[string]any{
-			"level": "error",
-			"msg":   strings.Trim(string(p), "\n"),
-		})
+		logmsg("error", strings.Trim(string(p), "\n"), logData)
 		return len(p), nil
 	}
 
@@ -159,12 +149,12 @@ func (w *localWriter) Write(p []byte) (int, error) {
 		err := json.Unmarshal(w.buf[0:pos], &m)
 		if err != nil {
 			// The line is not a JSON, so create a map and put the line there.
-			m = map[string]any{
-				"msg": string(w.buf[0:pos]),
-			}
+			logmsg("warn", string(w.buf[0:pos]), logData)
+		} else {
+			level, _ := m["level"].(string)
+			msg, _ := m["msg"].(string)
+			logmsg(level, msg, m)
 		}
-		emit(m)
-
 		rest := w.buf[pos+1:]
 		ll := len(rest)
 		copy(w.buf, rest)
@@ -173,50 +163,54 @@ func (w *localWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func run(p proc, requests <-chan string, quit chan<- bool) {
+type child struct {
+	startTime time.Time
+	quitChan  chan error
+	stop      func()
+}
+
+func createProcess(p proc) (*child, error) {
+	args := strings.Split(p.Command, " ")
+
+	t := time.Now()
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = p.Dir
+	cmd.Stdout = &localWriter{procName: p.Name, stream: "stdout"}
+	cmd.Stderr = &localWriter{procName: p.Name, stream: "stderr"}
+	err := cmd.Start()
+	if err != nil {
+		return nil, err
+	}
+	logmsg("info", "started", map[string]any{
+		"pid":       cmd.Process.Pid,
+		"visorProc": p.Name,
+	})
+	quit := make(chan error, 1)
+	go func() {
+		quit <- cmd.Wait()
+	}()
+	stop := func() {
+		cmd.Process.Signal(os.Interrupt)
+		err = cmd.Wait()
+		if err != nil {
+			log.Printf("wait failed: %v", err)
+		}
+	}
+	return &child{t, quit, stop}, nil
+}
+
+func maintainProcess(p proc, requests <-chan string, quit chan<- bool) {
 	defer func() {
 		quit <- true
 	}()
-	args := strings.Split(p.Command, " ")
 	quits := 0
-	data := map[string]string{
+	logData := map[string]any{
 		"visorProc": p.Name,
 	}
-
-	type child struct {
-		startTime time.Time
-		quitChan  chan error
-		stop      func()
-	}
-
-	start := func() (*child, error) {
-		t := time.Now()
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = p.Dir
-		cmd.Stdout = &localWriter{procName: p.Name, stream: "stdout"}
-		cmd.Stderr = &localWriter{procName: p.Name, stream: "stderr"}
-		err := cmd.Start()
-		if err != nil {
-			return nil, err
-		}
-		msg("info", fmt.Sprintf("started %s, pid = %v\n", p.Name, cmd.Process.Pid), nil)
-		quit := make(chan error, 1)
-		go func() {
-			quit <- cmd.Wait()
-		}()
-		stop := func() {
-			cmd.Process.Signal(os.Interrupt)
-			err = cmd.Wait()
-			if err != nil {
-				log.Printf("wait failed: %v", err)
-			}
-		}
-		return &child{t, quit, stop}, nil
-	}
 	for {
-		child, err := start()
+		child, err := createProcess(p)
 		if err != nil {
-			msg("error", fmt.Sprintf("failed to start: %v", err), data)
+			logmsg("error", fmt.Sprintf("failed to start: %v", err), logData)
 			return
 		}
 		select {
@@ -226,11 +220,11 @@ func run(p proc, requests <-chan string, quit chan<- bool) {
 		case req := <-requests:
 			switch req {
 			case "reboot":
-				msg("info", "get a reboot signal, waiting for the process to exit", data)
+				logmsg("info", "got a reboot signal, waiting for the process to exit", logData)
 				child.stop()
 				quits = 0
 			case "term":
-				msg("info", "got a termination signal, closing the process", data)
+				logmsg("info", "got a termination signal, closing the process", logData)
 				child.stop()
 				return
 			}
@@ -243,7 +237,7 @@ func run(p proc, requests <-chan string, quit chan<- bool) {
 			case req := <-requests:
 				switch req {
 				case "term":
-					msg("info", "got a termination signal, quitting", data)
+					logmsg("info", "got a termination signal, quitting", logData)
 					return
 				}
 			}
@@ -251,8 +245,8 @@ func run(p proc, requests <-chan string, quit chan<- bool) {
 	}
 }
 
-func msg(level string, message string, data map[string]string) {
-	e := map[string]string{}
+func logmsg(level, message string, data map[string]any) {
+	e := map[string]any{}
 	for k, v := range data {
 		e[k] = v
 	}
@@ -262,6 +256,8 @@ func msg(level string, message string, data map[string]string) {
 	s, err := json.Marshal(e)
 	if err != nil {
 		log.Println("failed to format a log", err)
+		log.Println(level, message, data)
+		return
 	}
 	os.Stdout.WriteString(string(s) + "\n")
 }
