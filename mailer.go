@@ -14,7 +14,9 @@ var q = []string{}
 
 func report(format string, a ...interface{}) {
 	msg := fmt.Sprintf(format, a...)
-	log.Println("report:", msg)
+	logmsg("info", "report", map[string]any{
+		"report": msg,
+	})
 	qlock.Lock()
 	defer qlock.Unlock()
 	q = append(q, msg)
