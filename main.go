@@ -237,6 +237,14 @@ func maintainProcess(p proc, requests <-chan string, quit chan<- bool) {
 }
 
 func logmsg(level, message string, data map[string]any) {
+	if _, ok := data["alert"]; ok {
+		b, err := json.MarshalIndent(data, "", "  ")
+		if err != nil {
+			report("%s: %v", message, data)
+		} else {
+			report("%s: %s", message, string(b))
+		}
+	}
 	e := map[string]any{}
 	for k, v := range data {
 		e[k] = v

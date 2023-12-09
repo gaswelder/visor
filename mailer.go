@@ -14,7 +14,7 @@ var q = []string{}
 
 func report(format string, a ...interface{}) {
 	msg := fmt.Sprintf(format, a...)
-	logmsg("info", "report", map[string]any{
+	logmsg("info", "sending a report", map[string]any{
 		"report": msg,
 	})
 	qlock.Lock()
@@ -56,6 +56,8 @@ func sendReports(email, key, secret string) {
 		_, err := mailjetClient.SendMailV31(&messages)
 		if err != nil {
 			log.Printf("failed to send email: %v", err)
+		} else {
+			logmsg("info", "sent an email", nil)
 		}
 	}
 }
