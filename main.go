@@ -2,12 +2,11 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -26,11 +25,12 @@ type proc struct {
 	Name    string
 	Command string
 	Dir     string
+	logger  *slog.Logger
 }
 
 func main() {
 	godotenv.Load()
-	data, err := ioutil.ReadFile("visor.json")
+	data, err := os.ReadFile("visor.json")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -51,11 +51,20 @@ func main() {
 	if email == "" {
 		log.Fatal("Missing email config parameter")
 	}
-	go sendReports(email, key, secret)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if a.Key == "time" {
+				a.Key = "t"
+			}
+			return a
+		},
+	}))
+	go sendReports(logger, email, key, secret)
 
 	requestChannels := map[string]chan string{}
 	quitChannels := map[string]chan bool{}
 	for _, p := range config.Processes {
+		p.logger = logger.With("visorProc", p.Name)
 		r := make(chan string)
 		q := make(chan bool)
 		requestChannels[p.Name] = r
@@ -114,46 +123,6 @@ func main() {
 	}
 }
 
-type localWriter struct {
-	buf      []byte
-	procName string
-	stream   string
-}
-
-func (w *localWriter) Write(p []byte) (int, error) {
-	logData := map[string]any{"visorProc": w.procName}
-
-	// Assume anything that's in stderr is an error and not structured.
-	if w.stream == "stderr" {
-		logmsg("error", strings.Trim(string(p), "\n"), logData)
-		return len(p), nil
-	}
-
-	w.buf = append(w.buf, p...)
-	for {
-		pos := bytes.IndexByte(w.buf, '\n')
-		if pos < 0 {
-			break
-		}
-
-		var m map[string]any
-		err := json.Unmarshal(w.buf[0:pos], &m)
-		if err != nil {
-			// The line is not a JSON, so create a map and put the line there.
-			logmsg("warn", string(w.buf[0:pos]), logData)
-		} else {
-			level, _ := m["level"].(string)
-			msg, _ := m["msg"].(string)
-			logmsg(level, msg, m)
-		}
-		rest := w.buf[pos+1:]
-		ll := len(rest)
-		copy(w.buf, rest)
-		w.buf = w.buf[0:ll]
-	}
-	return len(p), nil
-}
-
 type child struct {
 	startTime time.Time
 	quitChan  chan error
@@ -166,16 +135,14 @@ func createProcess(p proc) (*child, error) {
 	t := time.Now()
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Dir = p.Dir
-	cmd.Stdout = &localWriter{procName: p.Name, stream: "stdout"}
-	cmd.Stderr = &localWriter{procName: p.Name, stream: "stderr"}
+	cmd.Stdout = &localWriter{logger: p.logger}
+	cmd.Stderr = &localWriter{logger: p.logger, isStderr: true}
 	err := cmd.Start()
 	if err != nil {
 		return nil, err
 	}
-	logmsg("info", "started", map[string]any{
-		"pid":       cmd.Process.Pid,
-		"visorProc": p.Name,
-	})
+	p.logger.Info("started", "visorPid", cmd.Process.Pid)
+
 	quit := make(chan error, 1)
 	go func() {
 		quit <- cmd.Wait()
@@ -195,60 +162,40 @@ func maintainProcess(p proc, requests <-chan string, quit chan<- bool) {
 		quit <- true
 	}()
 	quits := 0
-	logData := map[string]any{
-		"visorProc": p.Name,
-	}
 	for {
 		child, err := createProcess(p)
 		if err != nil {
-			logmsg("error", fmt.Sprintf("failed to start: %v", err), logData)
+			p.logger.Error(fmt.Sprintf("failed to start: %v", err))
 			return
 		}
 		select {
 		case err := <-child.quitChan:
-			report("%s quit after %v: %v", p.Name, time.Since(child.startTime), err)
+			report(p.logger, "%s quit after %v: %v", p.Name, time.Since(child.startTime), err)
 			quits++
 		case req := <-requests:
 			switch req {
 			case "reboot":
-				logmsg("info", "got a reboot signal, waiting for the process to exit", logData)
+				p.logger.Info("got a reboot signal, waiting for the process to exit")
 				child.stop()
 				quits = 0
 			case "term":
-				logmsg("info", "got a termination signal, closing the process", logData)
+				p.logger.Info("got a termination signal, closing the process")
 				child.stop()
 				return
 			}
 		}
 		if quits > 2 {
 			quits = 0
-			report("%s: taking a timeout, %s", p.Name, time.Hour.String())
+			report(p.logger, "%s: taking a timeout, %s", p.Name, time.Hour.String())
 			select {
 			case <-time.After(time.Hour):
 			case req := <-requests:
 				switch req {
 				case "term":
-					logmsg("info", "got a termination signal, quitting", logData)
+					p.logger.Info("got a termination signal, quitting")
 					return
 				}
 			}
 		}
 	}
-}
-
-func logmsg(level, message string, data map[string]any) {
-	e := map[string]any{}
-	for k, v := range data {
-		e[k] = v
-	}
-	e["level"] = level
-	e["msg"] = message
-	e["t"] = time.Now().Format(time.RFC3339)
-	s, err := json.Marshal(e)
-	if err != nil {
-		log.Println("failed to format a log", err)
-		log.Println(level, message, data)
-		return
-	}
-	os.Stdout.WriteString(string(s) + "\n")
 }

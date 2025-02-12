@@ -1,6 +1,6 @@
 module github.com/gaswelder/visor
 
-go 1.18
+go 1.23
 
 require (
 	github.com/joho/godotenv v1.4.0
