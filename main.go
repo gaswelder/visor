@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -23,6 +24,9 @@ func main() {
 		line := make([]byte, 4096)
 		for {
 			n, err := conn.Read(line)
+			if err == io.EOF {
+				break
+			}
 			if err != nil {
 				log.Fatal(err)
 			}
